@@ -33,16 +33,28 @@ class ReplyClient(private val prefs: Prefs) {
         val convo = snapshot.messages.takeLast(10).joinToString("\n") {
             (if (it.side == "me") "我" else "对方") + "：" + it.text
         }
-        val sys = "你是即时通讯回复助手。只输出一个 JSON 数组，含且仅含 $n 条候选回复文本，" +
+        // 推特走「按内容写评论」那套提示词（一套通吃：帖子当主内容、已有回复当上下文）；
+        // 其它 App 保持原来的聊天提示词，一个字没改。
+        val isX = snapshot.sourcePkg == "com.twitter.android"
+        val sys = if (isX) CommentPrompts.system(prefs.replyStyle, n) else
+            "你是即时通讯回复助手。只输出一个 JSON 数组，含且仅含 $n 条候选回复文本，" +
             (if (n > 1) "各条策略要有区别（例如：一条稳妥承接、一条给具体行动或承诺、一条简短低姿态）。"
              else "给出最稳妥、最自然的一条。") +
             "回复语言跟随对方最近一条消息：对方用英文就用自然的英文回复，用中文就用中文回复。" +
             "每条不超过 40 字（英文不超过 30 个单词），口语、自然、像真人在聊天软件里发消息。不要解释，不要加引号以外的内容，直接输出 JSON 数组。"
-        val user = knowledgeBlock(relationship, ctx) +
-            "关系：$relationship\n\n最近对话：\n$convo\n\n" +
-            (if (avoid.isEmpty()) "" else
-                "下面这些回复已经给过，不要重复，也不要只是换个说法：\n" + avoid.joinToString("\n") { "- $it" } + "\n\n") +
-            "请给出 $n 条候选回复。"
+        val user = if (isX) {
+            // 推特：第一条是主内容（帖子正文 / 对方最新消息），其余是已有回复
+            val main = snapshot.messages.firstOrNull()?.text ?: ""
+            val surroundings = snapshot.messages.drop(1).takeLast(8).map { it.text }
+            knowledgeBlock(relationship, ctx) +
+                CommentPrompts.user(main, snapshot.title, surroundings, n, avoid)
+        } else {
+            knowledgeBlock(relationship, ctx) +
+                "关系：$relationship\n\n最近对话：\n$convo\n\n" +
+                (if (avoid.isEmpty()) "" else
+                    "下面这些回复已经给过，不要重复，也不要只是换个说法：\n" + avoid.joinToString("\n") { "- $it" } + "\n\n") +
+                "请给出 $n 条候选回复。"
+        }
         return parseN(chat(sys, user, temperature = if (avoid.isEmpty()) 0.8 else 0.95), n)
     }
 

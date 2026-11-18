@@ -392,6 +392,10 @@ class XAdapter : ChatAppAdapter {
         // would otherwise have counted as "hasInput".
         if (hasNewDmMarker || (sawListHeading && rows.isEmpty())) return null
 
+        // 帖子详情页：没有「发件人：正文」那种行，正文和评论是普通 TextView。
+        // 先试帖子页，读到了就直接返回；读不到再按私信页规则走。
+        extractPost(root, res)?.let { return it }
+
         // A chat window needs BOTH an input box AND something that only a
         // thread has: an actual message-row shape, or the "私信" placeholder an
         // empty thread shows. A list screen's search box has an EditText too,
@@ -408,5 +412,65 @@ class XAdapter : ChatAppAdapter {
         return ChatSnapshot(title, msgs)
     }
 
+    /**
+     * 帖子详情页：读主贴正文 + 作者 + 屏幕上已加载的回复。
+     *
+     * 帖子页的回复框也是 EditText，所以「有输入框」本身不区分私信和帖子——
+     * 真正区分的是内容形态：帖子页有长段正文的 TextView，没有「谁：说了什么」的行。
+     *
+     * 返回 null = 这一屏不像帖子页（交回私信逻辑处理）。
+     */
+    private fun extractPost(root: AccessibilityNodeInfo, res: Resources): ChatSnapshot? {
+        val width = res.displayMetrics.widthPixels
+        val bodies = ArrayList<Pair<Int, String>>()   // top to text
+        var author: String? = null
+        var hasReplyBox = false
+        var guard = 0
+        val stack = ArrayDeque<AccessibilityNodeInfo>()
+        stack.addLast(root)
+        while (stack.isNotEmpty() && guard < 6000) {
+            guard++
+            val node = stack.removeLast()
+            val cls = node.className?.toString()
+            if (node.isEditable || cls == "android.widget.EditText") hasReplyBox = true
+            val label = (node.text?.toString() ?: node.contentDescription?.toString())?.trim()
+            if (!label.isNullOrBlank()) {
+                // 作者：@handle 或 "名字 @handle" 形态，取第一次出现的
+                if (author == null) {
+                    val m = X_HANDLE.find(label)
+                    if (m != null && m.range.first <= 40) author = label.take(60)
+                }
+                val b = Rect(); node.getBoundsInScreen(b)
+                // 正文：够长、不是按钮文案、不是纯时间/数字
+                val looksLikeBody = label.length >= 8 &&
+                    !label.contains("回复") && !label.startsWith("Reply") &&
+                    !label.contains("转推") && !label.contains("喜欢") &&
+                    !label.contains("查看") && !label.contains("更多") &&
+                    !X_PURE_NUMBER.matches(label) && !X_TIME_ONLY.matches(label)
+                if (looksLikeBody) bodies.add(b.top to label)
+            }
+            for (i in node.childCount - 1 downTo 0) node.getChild(i)?.let { stack.addLast(it) }
+        }
+        if (!hasReplyBox || bodies.isEmpty()) return null
+        bodies.sortBy { it.first }
+        // 去重（同一个节点可能既 text 又 contentDescription）
+        val seen = LinkedHashSet<String>()
+        val texts = bodies.map { it.second }.filter { seen.add(it) }
+        if (texts.size < 2) return null   // 只有一条还算不上「帖子 + 回复」
+        // 第一条当主贴，其余当已有回复：统一塞进 messages，下游一视同仁
+        val msgs = ArrayList<Msg>()
+        msgs.add(Msg("other", texts.first()))
+        texts.drop(1).take(8).forEach { msgs.add(Msg("other", it)) }
+        val t = author ?: findTitleInActionBar(root, Int.MAX_VALUE, width, res, 0.1, 0.9)
+        return ChatSnapshot(t, msgs)
+    }
+
     private data class Row(val top: Int, val sender: String, val text: String)
+
+    companion object {
+        /** 作者标识：@handle（推特用户名的统一形态）。 */
+        private val X_HANDLE = Regex("@[A-Za-z0-9_]{2,15}")
+        private val X_PURE_NUMBER = Regex("""^[\d,.\s万kK]+$""")
+        private val X_TIME_ONLY = Regex("""^\d{1,2}[:：]\d{2}.*$""")
+    }
 }

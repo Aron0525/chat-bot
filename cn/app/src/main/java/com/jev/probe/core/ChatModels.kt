@@ -28,13 +28,18 @@ data class ChatSnapshot(
     val title: String?,
     val messages: List<Msg>,
     val bubbleRects: List<BubbleRect> = emptyList(),
-    val note: String? = null
+    val note: String? = null,
+    /** 这份快照从哪个 App 读来的；提示词要按 App 分流时用（推特走评论那套）。 */
+    val sourcePkg: String? = null
 ) {
     val latestFrom: String? get() = messages.lastOrNull()?.side
 
     /** A stable signature of the last few messages, to detect real changes. */
     fun signature(): String =
         messages.takeLast(6).joinToString("|") { "${it.side}:${it.text}" }
+
+    /** 这个快照来自哪个 App；提示词按 App 分流时用。 */
+    fun withSource(pkg: String?): ChatSnapshot = copy(sourcePkg = pkg)
 }
 
 /** Jev's judgment result for one snapshot, plus the ranked candidate replies. */

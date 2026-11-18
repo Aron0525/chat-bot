@@ -413,7 +413,7 @@ open class ChatCaptureService : AccessibilityService() {
         // 直填模式：只在推特上生效——不自动分析、不显示卡片，只有用户点球才分析。
         // 其它 App（QQ/飞书/WhatsApp）照旧走卡片那套，两套互不干扰。
         if (quickMode && pkg == X_PKG) {
-            currentSnapshot = snapshot
+            currentSnapshot = snapshot.withSource(pkg)
             if (QuickFillSession.size() > 0 &&
                 !QuickFillSession.matches(QuickFillSession.signatureOf(snapshot))) {
                 // 对方发了新消息 / 换了会话：这一轮的候选作废，别再拿旧回复去套
@@ -453,7 +453,7 @@ open class ChatCaptureService : AccessibilityService() {
         // whose last few messages happen to match cannot swallow each other.
         if (pkg != activePkg) { activePkg = pkg; lastSignature = "" }
 
-        currentSnapshot = snapshot
+        currentSnapshot = snapshot.withSource(pkg)
         val sig = snapshot.signature()
         val showing = overlay?.isShowing() == true
         // Same content and the card is already up → nothing to do.
@@ -556,7 +556,7 @@ open class ChatCaptureService : AccessibilityService() {
         val target = targetFor(root) ?: return null
         observeTarget(target)
         overlay?.setApp(pkg)
-        currentSnapshot = snapshot
+        currentSnapshot = snapshot.withSource(pkg)
         activePkg = pkg
         if (!snapshot.title.isNullOrBlank()) lastKnownTitle = snapshot.title
         return snapshot
@@ -990,7 +990,7 @@ open class ChatCaptureService : AccessibilityService() {
         if (!prefs.isAllowed(snapshot.title)) { leaveConversation(); overlay?.hide(); return }
 
         if (pkg.isNotEmpty() && pkg != activePkg) { activePkg = pkg; lastSignature = "" }
-        currentSnapshot = snapshot
+        currentSnapshot = snapshot.withSource(pkg)
         overlay?.setApp(pkg.ifEmpty { null })
         val sig = snapshot.signature()
         // Manual taps always re-run; the automatic path dedupes like the tree path.

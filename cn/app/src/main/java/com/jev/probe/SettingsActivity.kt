@@ -365,6 +365,17 @@ class SettingsActivity : AppCompatActivity() {
                 "不满意再点换成下一条，第 3 条之后回到第 1 条。两种方式都不会替你发送。",
             11f, sub))
 
+        // --- 回复风格（推特按内容写评论时用）---
+        card2.addView(label("回复风格（推特按内容写回复时用）"))
+        val styleLabels = com.jev.probe.jev.CommentPrompts.STYLES.map { it.second }
+        val styleValues = com.jev.probe.jev.CommentPrompts.STYLES.map { it.first }
+        var pickedStyle = styleValues.indexOf(prefs.replyStyle).coerceAtLeast(0)
+        card2.addView(pills(styleLabels, pickedStyle) { pickedStyle = it })
+        card2.addView(text(
+            "混合：每条角度不同，一条接观点、一条补充看法、一条追问或质疑。\n" +
+                "克制友好、有观点、幽默玩梗三种是统一基调。评论语言跟随原帖。",
+            11f, sub))
+
         // --- OCR 兜底（B 阶段）---
         val ocrFallbackRow = toggleRow("树读不到正文时用 OCR 兜底", prefs.ocrFallback)
         card2.addView(ocrFallbackRow)
@@ -497,6 +508,7 @@ class SettingsActivity : AppCompatActivity() {
             prefs.autoAnalyze = (autoRow.tag as? Boolean) ?: true
             prefs.candidateCount = pickedCount
             prefs.replyMode = if (pickedMode == 1) Prefs.REPLY_MODE_QUICK else Prefs.REPLY_MODE_PICK
+            prefs.replyStyle = styleValues.getOrElse(pickedStyle) { styleValues[0] }
             prefs.ocrFallback = (ocrFallbackRow.tag as? Boolean) ?: true
             prefs.ocrAutoAnalyze = (ocrAutoRow.tag as? Boolean) ?: false
             prefs.contextEnabled = (ctxRow.tag as? Boolean) ?: false

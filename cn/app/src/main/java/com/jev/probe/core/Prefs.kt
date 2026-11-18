@@ -233,6 +233,15 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         get() = sp.getInt(K_QB_Y, -1)
         set(v) = sp.edit().putInt(K_QB_Y, v).apply()
 
+    /**
+     * 回复风格（推特那套「按内容写回复」用）。取值见 [jev.CommentPrompts.STYLES]：
+     * 混合 / 温和友好 / 有观点 / 幽默玩梗。默认混合。
+     */
+    var replyStyle: String
+        get() = sp.getString(K_REPLY_STYLE, com.jev.probe.jev.CommentPrompts.STYLE_ALL)
+            ?: com.jev.probe.jev.CommentPrompts.STYLE_ALL
+        set(v) = sp.edit().putString(K_REPLY_STYLE, v).apply()
+
     /** Where the analysis card sits in [pkg] (px), or null for the default top position. */
     fun cardPosition(pkg: String): Pair<Int, Int>? {
         val x = sp.getInt(K_CARD_X + pkg, -1)
@@ -326,6 +335,7 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         private const val K_REPLY_MODE = "reply_mode"
         private const val K_QB_X = "quick_bubble_x"
         private const val K_QB_Y = "quick_bubble_y"
+        private const val K_REPLY_STYLE = "reply_style"
 
         /** 供 SharedPreferences 监听器比对用（值必须和上面的 key 一致）。 */
         const val KEY_REPLY_MODE = K_REPLY_MODE
