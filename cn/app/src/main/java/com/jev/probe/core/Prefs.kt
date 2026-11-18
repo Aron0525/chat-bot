@@ -213,6 +213,26 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         get() = sp.getInt(K_CANDIDATES, 3).coerceIn(1, 3)
         set(v) = sp.edit().putInt(K_CANDIDATES, v.coerceIn(1, 3)).apply()
 
+    /**
+     * 填入方式。两套方案并存，设置里切换：
+     * - [REPLY_MODE_PICK]（默认）：原来的卡片 + 3 条候选，点一条填入；
+     * - [REPLY_MODE_QUICK]：只在推特上出现的「一键直填」小球，点一次直接填第 1 条，
+     *   再点换下一条，不弹卡片。
+     * 默认仍是原方案：升级后行为不变，要新方案得自己去设置里切。
+     */
+    var replyMode: String
+        get() = sp.getString(K_REPLY_MODE, REPLY_MODE_PICK) ?: REPLY_MODE_PICK
+        set(v) = sp.edit().putString(K_REPLY_MODE, v).apply()
+
+    /** 直填小球的记忆位置（px）；-1 = 默认位置。与原面板的小球分开存，互不影响。 */
+    var quickBubbleX: Int
+        get() = sp.getInt(K_QB_X, -1)
+        set(v) = sp.edit().putInt(K_QB_X, v).apply()
+
+    var quickBubbleY: Int
+        get() = sp.getInt(K_QB_Y, -1)
+        set(v) = sp.edit().putInt(K_QB_Y, v).apply()
+
     /** Where the analysis card sits in [pkg] (px), or null for the default top position. */
     fun cardPosition(pkg: String): Pair<Int, Int>? {
         val x = sp.getInt(K_CARD_X + pkg, -1)
@@ -303,6 +323,12 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         private const val K_BUBBLE_X = "bubble_x"
         private const val K_AUTO = "auto_analyze"
         private const val K_CANDIDATES = "candidate_count"
+        private const val K_REPLY_MODE = "reply_mode"
+        private const val K_QB_X = "quick_bubble_x"
+        private const val K_QB_Y = "quick_bubble_y"
+
+        /** 供 SharedPreferences 监听器比对用（值必须和上面的 key 一致）。 */
+        const val KEY_REPLY_MODE = K_REPLY_MODE
         private const val K_CARD_X = "card_x_"
         private const val K_CARD_Y = "card_y_"
 
@@ -315,6 +341,10 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
 
         const val OCR_MLKIT = "mlkit"
         const val OCR_VISION = "vision"
+
+        /** 填入方式的两个取值，见 [replyMode]。 */
+        const val REPLY_MODE_PICK = "pick"
+        const val REPLY_MODE_QUICK = "quick"
 
         // Judge route presets.
         // Bocha Jev: same protocol/path as TypeSafe (/v1/systemone). Limited-time free.

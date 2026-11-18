@@ -355,6 +355,16 @@ class SettingsActivity : AppCompatActivity() {
         card2.addView(pills(listOf("1 条", "2 条", "3 条"), pickedCount - 1) { pickedCount = it + 1 })
         card2.addView(text("只要 1 条时不做排序，出得更快；不满意可以在卡片里点「换一组」。", 11f, sub))
 
+        // --- 填入方式（两套方案，切换用）---
+        card2.addView(label("填入方式"))
+        var pickedMode = if (prefs.replyMode == Prefs.REPLY_MODE_QUICK) 1 else 0
+        card2.addView(pills(listOf("点选候选", "一键直填（仅推特）"), pickedMode) { pickedMode = it })
+        card2.addView(text(
+            "点选候选：卡片里列 3 条，你点哪条填哪条（原来的方式）。\n" +
+                "一键直填：推特聊天界面旁边多一个小绿球，点一下直接分析并把第 1 条填进输入框，" +
+                "不满意再点换成下一条，第 3 条之后回到第 1 条。两种方式都不会替你发送。",
+            11f, sub))
+
         // --- OCR 兜底（B 阶段）---
         val ocrFallbackRow = toggleRow("树读不到正文时用 OCR 兜底", prefs.ocrFallback)
         card2.addView(ocrFallbackRow)
@@ -486,6 +496,7 @@ class SettingsActivity : AppCompatActivity() {
                 .map { it.trim() }.filter { it.isNotEmpty() }.toSet()
             prefs.autoAnalyze = (autoRow.tag as? Boolean) ?: true
             prefs.candidateCount = pickedCount
+            prefs.replyMode = if (pickedMode == 1) Prefs.REPLY_MODE_QUICK else Prefs.REPLY_MODE_PICK
             prefs.ocrFallback = (ocrFallbackRow.tag as? Boolean) ?: true
             prefs.ocrAutoAnalyze = (ocrAutoRow.tag as? Boolean) ?: false
             prefs.contextEnabled = (ctxRow.tag as? Boolean) ?: false

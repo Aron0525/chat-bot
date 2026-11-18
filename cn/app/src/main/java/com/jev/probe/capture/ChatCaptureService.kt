@@ -18,10 +18,12 @@ import com.jev.probe.core.BubbleRect
 import com.jev.probe.core.ChatSnapshot
 import com.jev.probe.core.Msg
 import com.jev.probe.core.Prefs
+import com.jev.probe.core.QuickFillSession
 import com.jev.probe.core.kb.ContextBuilder
 import com.jev.probe.core.kb.KbStore
 import com.jev.probe.jev.JevClient
 import com.jev.probe.overlay.OverlayController
+import com.jev.probe.overlay.QuickFillBubble
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
@@ -86,6 +88,22 @@ open class ChatCaptureService : AccessibilityService() {
     private lateinit var prefs: Prefs
     private var overlay: OverlayController? = null
 
+    /** 「一键直填」的球（只对推特出现），和卡片面板互斥。 */
+    private var quickBubble: QuickFillBubble? = null
+    /** 直填模式下有一轮分析在飞：期间再点球只提示，不重复烧 token。 */
+    private var quickAnalysisPending = false
+    /** 最近一次认出来的会话标题，暂时读不到时用来保住卡片内容。 */
+    private var lastKnownTitle: String? = null
+    /** 读不到聊天页的重试计数：Compose 页面经常晚一两帧才有输入框。 */
+    private var unreadableAttempts = 0
+    private val unreadableRetry = Runnable { maybeCapture() }
+    /** 白名单提示的节流，避免每条事件都弹一次 toast。 */
+    private var whitelistNoticeShown = false
+
+    /** 当前是不是「一键直填」模式。 */
+    private val quickMode: Boolean
+        get() = prefs.replyMode == Prefs.REPLY_MODE_QUICK
+
     private var lastSignature: String = ""
     private var activePkg: String? = null
     private var analyzing = false
@@ -104,6 +122,14 @@ open class ChatCaptureService : AccessibilityService() {
             main.post {
                 leaveConversation()
                 overlay?.hide()
+            }
+        }
+        // 切换填入方式：立刻按新方式收拾界面，不用等下一次事件
+        if (key == Prefs.KEY_REPLY_MODE) {
+            main.post {
+                QuickFillSession.clear()
+                syncQuickBubble(rootInActiveWindow?.packageName?.toString())
+                if (quickMode) overlay?.hide()
             }
         }
     }
@@ -244,9 +270,11 @@ open class ChatCaptureService : AccessibilityService() {
         getSharedPreferences(Prefs.PREFS_MAIN, MODE_PRIVATE)
             .registerOnSharedPreferenceChangeListener(preferencesListener)
         overlay = OverlayController(this)
-        overlay?.onManualAnalyze = {
-            currentSnapshot?.let { pendingSnapshot = it; runAnalysis() }
-        }
+        // 「一键直填」的球：只在推特 + 直填模式下出现，点一下分析并直接填入
+        quickBubble = QuickFillBubble(this, prefs) { quickTap() }
+        // 手动点面板：以前 currentSnapshot 为 null 就直接短路（点了毫无反应，
+        // 看着像「卡死不肯恢复」）。现在先就地重抓一次当前窗口，抓不到才提示。
+        overlay?.onManualAnalyze = { analyzeOnDemand() }
         overlay?.onRegenerate = { regenerateReplies() }
         // Bubble menu: file the open conversation as a knowledge-base contact.
         // Contacts are never created automatically — this is the one-tap way in.
@@ -306,6 +334,8 @@ open class ChatCaptureService : AccessibilityService() {
         // our own settings screens, the launcher, and the system UI.
         if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             val fg = rootInActiveWindow?.packageName?.toString()
+            // 直填球跟着前台走（离开推特就收走）
+            syncQuickBubble(fg)
             // Blocked apps: never read/screenshot/OCR/fill there, only show the
             // one-time "not supported" notice and stop. Checked before the
             // generic no-adapter branch.
@@ -343,6 +373,8 @@ open class ChatCaptureService : AccessibilityService() {
         main.removeCallbacks(confirmAwayHide)
         val root = rootInActiveWindow ?: run { leaveConversation(); overlay?.hide(); return }
         val pkg = root.packageName?.toString()
+        // 直填球跟着前台走：推特 + 直填模式才出现，其它情况立刻收走
+        syncQuickBubble(pkg)
         // Blocked apps — no tree read, no screenshot, no OCR, no fill. A
         // content-changed / scrolled event there only re-shows the one-time
         // notice (deduped); it must never reach an adapter or the OCR path.
@@ -360,15 +392,37 @@ open class ChatCaptureService : AccessibilityService() {
         // bubble so the menu stays reachable. Without this, opening QQ / Feishu on
         // their list screen produced no bubble at all.
         val rawSnapshot = adapter.extract(root, resources)
-        if (rawSnapshot == null) { scheduleLeave(); return }
+        if (rawSnapshot == null) { retryWhenUnreadable(); return }
         val target = targetFor(root)
-        if (target == null) { scheduleLeave(); return }
+        if (target == null) { retryWhenUnreadable(); return }
+        unreadableAttempts = 0
+        main.removeCallbacks(unreadableRetry)
         main.removeCallbacks(confirmLeave)
         observeTarget(target)
         overlay?.setApp(pkg)
         // Use only this window's title; never inherit another conversation's title.
         val snapshot = rawSnapshot
-        if (!prefs.isAllowed(snapshot.title)) { leaveConversation(); overlay?.hide(); return }
+        if (!snapshot.title.isNullOrBlank()) lastKnownTitle = snapshot.title
+        if (!prefs.isAllowed(snapshot.title)) {
+            // 以前这里是静默 hide()：面板凭空消失，用户只会以为 App 坏了
+            noWhitelistNotice()
+            leaveConversation()
+            overlay?.hide()
+            return
+        }
+        // 直填模式：只在推特上生效——不自动分析、不显示卡片，只有用户点球才分析。
+        // 其它 App（QQ/飞书/WhatsApp）照旧走卡片那套，两套互不干扰。
+        if (quickMode && pkg == X_PKG) {
+            currentSnapshot = snapshot
+            if (QuickFillSession.size() > 0 &&
+                !QuickFillSession.matches(QuickFillSession.signatureOf(snapshot))) {
+                // 对方发了新消息 / 换了会话：这一轮的候选作废，别再拿旧回复去套
+                QuickFillSession.clear()
+                quickBubble?.setLabel(null)
+            }
+            overlay?.hide()
+            return
+        }
         // In a chat window but the tree holds no text (Feishu draws its bodies)
         // → screenshot + OCR, subject
         // to ScreenCapture's own >=1s throttle and failure backoff.
@@ -451,6 +505,133 @@ open class ChatCaptureService : AccessibilityService() {
         main.postDelayed(confirmLeave, LEAVE_CONFIRM_MS)
     }
 
+    /**
+     * 读不到「这个 App 的聊天页」时别第一帧就判死。推特是 Compose 画的，
+     * 键盘收起、转场动画、刚点进私信的那一两帧里输入框可能还不在树里，
+     * 一帧就 leaveConversation 会让面板塌成球、而且再也点不动。
+     * 这里退让两次（300ms / 600ms）再判定离开。
+     */
+    private fun retryWhenUnreadable() {
+        if (unreadableAttempts < 2) {
+            unreadableAttempts++
+            main.removeCallbacks(unreadableRetry)
+            main.postDelayed(unreadableRetry, if (unreadableAttempts == 1) 300L else 600L)
+            return
+        }
+        unreadableAttempts = 0
+        scheduleLeave()
+    }
+
+    /** 白名单挡掉时说明原因（节流），别让面板静悄悄消失。 */
+    private fun noWhitelistNotice() {
+        if (whitelistNoticeShown) return
+        whitelistNoticeShown = true
+        overlay?.toast("当前会话不在白名单里，去设置里把标题加进白名单才能用")
+        main.postDelayed({ whitelistNoticeShown = false }, 5000)
+    }
+
+    /** 直填球只在「直填模式 + 前台是推特 + 助手开着」时出现，其它情况立刻收走。 */
+    private fun syncQuickBubble(pkg: String?) {
+        val bubble = quickBubble ?: return
+        val want = quickMode && prefs.enabled && pkg == X_PKG
+        if (want) {
+            if (!bubble.isShowing()) bubble.show()
+        } else if (bubble.isShowing()) {
+            bubble.hide()
+            bubble.setLabel(null)
+        }
+    }
+
+    /**
+     * 就地重抓一次当前窗口，成功就把它当作当前会话。
+     * 这是「点了没反应」的解药：以前只有 maybeCapture 有机会刷新 currentSnapshot，
+     * 一旦它被清空，手动点击就永远短路。
+     */
+    private fun captureNow(): ChatSnapshot? {
+        val root = rootInActiveWindow ?: return null
+        val pkg = root.packageName?.toString() ?: return null
+        if (isBlocked(pkg)) return null
+        val adapter = adapters[pkg] ?: return null
+        val snapshot = adapter.extract(root, resources) ?: return null
+        val target = targetFor(root) ?: return null
+        observeTarget(target)
+        overlay?.setApp(pkg)
+        currentSnapshot = snapshot
+        activePkg = pkg
+        if (!snapshot.title.isNullOrBlank()) lastKnownTitle = snapshot.title
+        return snapshot
+    }
+
+    /** 手动入口：先抓，抓不到给人话；抓到就按当前模式走。 */
+    private fun analyzeOnDemand() {
+        val snapshot = currentSnapshot ?: captureNow()
+        if (snapshot == null) {
+            overlay?.toast("没认出当前聊天页：滚动一下，或切回聊天窗口再点")
+            return
+        }
+        if (!prefs.isAllowed(snapshot.title)) {
+            noWhitelistNotice()
+            return
+        }
+        pendingSnapshot = snapshot
+        runAnalysis()
+    }
+
+    /**
+     * 直填球被点：已经有一轮候选就换下一条，否则开始新一轮（分析 → 排第一 → 直接填）。
+     * 三条点完回到第 1 条，不重新生成（按定稿）。
+     */
+    private fun quickTap() {
+        if (!prefs.enabled) { overlay?.toast("助手已关闭"); return }
+        if (analyzing || quickAnalysisPending) { overlay?.toast("正在分析，稍等一下"); return }
+        if (!prefs.hasKey()) { overlay?.toast("还没填判断接口的密钥，去设置里填"); return }
+        val snapshot = captureNow()
+        if (snapshot == null) {
+            overlay?.toast("没认出推特聊天页：进到私信里再点")
+            return
+        }
+        if (!prefs.isAllowed(snapshot.title)) { noWhitelistNotice(); return }
+        val sig = QuickFillSession.signatureOf(snapshot)
+        if (QuickFillSession.matches(sig)) {
+            val next = QuickFillSession.next()
+            if (next != null) {
+                val (text, i, total) = next
+                quickBubble?.setLabel(label(i, total))
+                fillInput(session.token() ?: return, text, "已填入第 $i/$total 条，发送还是你点")
+                return
+            }
+        }
+        // 新一轮：分析完再填，期间别让用户连点烧 token
+        QuickFillSession.clear()
+        pendingSnapshot = snapshot
+        quickAnalysisPending = true
+        quickBubble?.setLabel("…")
+        runAnalysis(quick = sig)
+    }
+
+    /** 球上的极简状态：`①/③`。 */
+    private fun label(i: Int, total: Int): String = "$i/$total"
+
+    /** 直填模式分析完成：把候选存成这一轮，直接把第 1 条填进去。 */
+    private fun quickFillStart(
+        token: ConversationSession.Token,
+        ranked: List<com.jev.probe.core.RankedReply>,
+        error: String?,
+        sig: String
+    ) {
+        quickAnalysisPending = false
+        if (error != null || ranked.isEmpty()) {
+            quickBubble?.setLabel(null)
+            overlay?.toast(error ?: "没生成出候选回复")
+            return
+        }
+        QuickFillSession.reset(sig, ranked.map { it.text })
+        val next = QuickFillSession.next() ?: return
+        val (text, i, total) = next
+        quickBubble?.setLabel(label(i, total))
+        fillInput(token, text, "已填入第 $i/$total 条，发送还是你点")
+    }
+
     /** "换一组" / 重试: redraft the candidates only; the judgment on the card stays. */
     private fun regenerateReplies() {
         if (analyzing || regenerating || destroyed || !prefs.enabled) return
@@ -517,21 +698,33 @@ open class ChatCaptureService : AccessibilityService() {
         return TRANSIENT_TITLE_WORDS.any { lower.contains(it.lowercase()) }
     }
 
-    private fun runAnalysis() {
+    /**
+     * [quick] 非空 = 「一键直填」那一套发起的分析：不碰卡片、不弹候选，
+     * 排名回来直接填第 1 条（见 [quickFillStart]）。null = 原来的卡片流程。
+     */
+    private fun runAnalysis(quick: String? = null) {
         val snapshot = pendingSnapshot ?: return
         if (analyzing || destroyed || !prefs.enabled) {
             // A lost round used to strand analyzing=true here forever, with
             // nothing in logcat saying why updates stopped — never again.
             if (analyzing) Log.w(TAG, "round skipped: previous round still in flight")
+            quickAnalysisPending = false
             return
         }
-        val previous = session.token() ?: return
-        if (!isCurrent(previous)) return
-        if (!prefs.hasKey()) { overlay?.showError("未设置判断接口密钥，去设置里填"); return }
-        val token = session.begin() ?: return
+        val previous = session.token() ?: run { quickAnalysisPending = false; return }
+        if (!isCurrent(previous)) { quickAnalysisPending = false; return }
+        if (!prefs.hasKey()) {
+            quickAnalysisPending = false
+            if (quick == null) overlay?.showError("未设置判断接口密钥，去设置里填")
+            else overlay?.toast("还没填判断接口的密钥，去设置里填")
+            return
+        }
+        val token = session.begin() ?: run { quickAnalysisPending = false; return }
         analyzing = true
-        overlay?.beginRound()
-        overlay?.setNote(snapshot.note)
+        if (quick == null) {
+            overlay?.beginRound()
+            overlay?.setNote(snapshot.note)
+        }
         val count = prefs.candidateCount
         val client = JevClient(prefs)
         val rel = prefs.relationship
@@ -545,7 +738,7 @@ open class ChatCaptureService : AccessibilityService() {
                 if (!isCurrent(token)) return@post
                 lastAnalyzed = snapshot
                 lastCtx = ctx
-                overlay?.setContextInfo(ctx?.notes?.size ?: 0, ctx?.history?.size ?: 0)
+                if (quick == null) overlay?.setContextInfo(ctx?.notes?.size ?: 0, ctx?.history?.size ?: 0)
                 var remaining = 2
                 fun completed() {
                     remaining--
@@ -563,10 +756,18 @@ open class ChatCaptureService : AccessibilityService() {
                     }
                     main.post {
                         if (isCurrent(token)) {
-                            when {
-                                judgment == null -> overlay?.showError("判断接口超时，请重试")
-                                judgment.error != null -> overlay?.showError(judgment.error)
-                                else -> overlay?.showJudgment(judgment)
+                            if (quick != null) {
+                                // 直填模式下不弹卡片：判断出问题就一句话说清楚，球继续留着
+                                when {
+                                    judgment == null -> overlay?.toast("判断接口超时，再点一次重试")
+                                    judgment.error != null -> overlay?.toast(judgment.error)
+                                }
+                            } else {
+                                when {
+                                    judgment == null -> overlay?.showError("判断接口超时，请重试")
+                                    judgment.error != null -> overlay?.showError(judgment.error)
+                                    else -> overlay?.showJudgment(judgment)
+                                }
                             }
                         }
                         // Outside the guard: a stale session must never strand
@@ -591,7 +792,14 @@ open class ChatCaptureService : AccessibilityService() {
                     }
                     main.post {
                         if (isCurrent(token)) {
-                            overlay?.showReplies(ranked, replyError) { text -> fillInput(token, text) }
+                            if (quick != null) {
+                                // 直填：不弹候选，直接填第 1 条
+                                quickFillStart(token, ranked, replyError, quick)
+                            } else {
+                                overlay?.showReplies(ranked, replyError) { text -> fillInput(token, text) }
+                            }
+                        } else if (quick != null) {
+                            quickAnalysisPending = false
                         }
                         completed() // outside the guard: see the judge round
                     }
@@ -825,11 +1033,21 @@ open class ChatCaptureService : AccessibilityService() {
         return input.takeIf { it.isVisibleToUser && it.isEnabled && !it.isPassword }
     }
 
-    /** Fill without blocking the main thread; all retries re-resolve the original target. */
-    private fun fillInput(token: ConversationSession.Token, text: String) {
+    /**
+     * Fill without blocking the main thread; all retries re-resolve the original target.
+     *
+     * [okMsg] 是成功后的提示。直填模式会带上「第 2/3 条」这种信息，卡片模式用默认那句。
+     * 注意 ACTION_SET_TEXT 本身就是整段替换：先清空上一条再写新的，是同一个动作，
+     * 不需要额外一次清空（多写一次反而容易把输入框弄没收）。
+     */
+    private fun fillInput(
+        token: ConversationSession.Token,
+        text: String,
+        okMsg: String = "已填入，确认后自己发送"
+    ) {
         fun finish(ok: Boolean) {
             if (!isCurrent(token)) return
-            if (ok) overlay?.toast("已填入，确认后自己发送")
+            if (ok) overlay?.toast(okMsg)
             else { copyToClipboard(text); overlay?.toast("已复制，长按输入框粘贴") }
         }
         if (!isCurrent(token)) { overlay?.toast("会话已变化，请重新分析后填入"); return }
@@ -899,11 +1117,17 @@ open class ChatCaptureService : AccessibilityService() {
         overlay?.onOcrCapture = null
         overlay?.hide()
         overlay = null
+        quickBubble?.hide()
+        quickBubble = null
+        QuickFillSession.clear()
         worker.shutdownNow()
     }
 
     companion object {
         private const val TAG = "JEVASSIST"
+
+        /** 推特包名：「一键直填」只对这一个 App 生效。 */
+        private const val X_PKG = "com.twitter.android"
 
         /** Hard ceiling on one round's judge/reply HTTP. HttpURLConnection bounds
          *  connect/read per attempt but NOT DNS resolution, so a wedged lookup
