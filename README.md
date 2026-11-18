@@ -4,7 +4,7 @@
 
 ## 快速开始
 
-1. 下载 [chat-bot-v1.11.apk](cn/apk/chat-bot-v1.11.apk)，或 `adb install -r cn/apk/chat-bot-v1.11.apk`
+1. 下载 [chat-bot-v1.0.apk](cn/apk/chat-bot-v1.0.apk)，或 `adb install -r cn/apk/chat-bot-v1.0.apk`
 2. 打开 App → 设置 → 填「判断接口」的 API Key（其余留空自动继承）
 3. 按主页清单开无障碍、悬浮窗、自启动权限
 4. 进聊天界面，等分析卡片出来；或切成「一键直填」用推特上的小绿球

@@ -62,12 +62,12 @@ Android 11+ · 仅 arm64-v8a · 不自动发送
 **1. 装包**
 
 ```bash
-adb install -r cn/apk/chat-bot-v1.11.apk
+adb install -r cn/apk/chat-bot-v1.0.apk
 ```
 
-或直接下载：[chat-bot-v1.11.apk](apk/chat-bot-v1.11.apk)
+或直接下载：[chat-bot-v1.0.apk](apk/chat-bot-v1.0.apk)
 
-> 换过签名，从更早的 debug 版升级需要先卸载旧版。
+> 包名 `com.aron.chatbot` 与之前的 Jev 版（`com.jev.probe`）不同，是独立应用，可并存安装。
 
 **2. 填密钥**
 

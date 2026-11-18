@@ -16,15 +16,15 @@ val releaseProps = Properties().apply {
 }
 
 android {
-    namespace = "com.jev.probe"
+    namespace = "com.aron.chatbot"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.jev.probe"
+        applicationId = "com.aron.chatbot"
         minSdk = 30
         targetSdk = 35
-        versionCode = 12
-        versionName = "1.11"
+        versionCode = 1
+        versionName = "1.0"
 
         // ML Kit's bundled Chinese recognizer ships native libs for every ABI.
         // The target phone (and every phone this can run on: minSdk 30) is
