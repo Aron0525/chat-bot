@@ -79,14 +79,14 @@ jobs:
           echo "built: $APK"
           BT=$(find "$ANDROID_HOME/build-tools" -maxdepth 1 -mindepth 1 -type d | sort -V | tail -n1)
           "$BT/apksigner" verify --print-certs "$APK" | head -n5
-          cp "$APK" "$RUNNER_TEMP/jev-$APP_VERSION.apk"
-          echo "APK_PATH=$RUNNER_TEMP/jev-$APP_VERSION.apk" >> "$GITHUB_ENV"
+          cp "$APK" "$RUNNER_TEMP/chat-bot-$APP_VERSION.apk"
+          echo "APK_PATH=$RUNNER_TEMP/chat-bot-$APP_VERSION.apk" >> "$GITHUB_ENV"
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: Jev ${{ env.APP_VERSION }}
+          name: chat-bot ${{ env.APP_VERSION }}
           files: ${{ env.APK_PATH }}
           generate_release_notes: true
           fail_on_unmatched_files: true

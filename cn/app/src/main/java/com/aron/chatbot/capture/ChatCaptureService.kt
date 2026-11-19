@@ -23,7 +23,6 @@ import com.aron.chatbot.core.kb.ContextBuilder
 import com.aron.chatbot.core.kb.KbStore
 import com.aron.chatbot.jev.JevClient
 import com.aron.chatbot.overlay.OverlayController
-import com.aron.chatbot.overlay.QuickFillBubble
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
@@ -88,8 +87,6 @@ open class ChatCaptureService : AccessibilityService() {
     private lateinit var prefs: Prefs
     private var overlay: OverlayController? = null
 
-    /** 「一键直填」的球（只对推特出现），和卡片面板互斥。 */
-    private var quickBubble: QuickFillBubble? = null
     /** 直填模式下有一轮分析在飞：期间再点球只提示，不重复烧 token。 */
     private var quickAnalysisPending = false
     /** 最近一次认出来的会话标题，暂时读不到时用来保住卡片内容。 */
@@ -124,12 +121,16 @@ open class ChatCaptureService : AccessibilityService() {
                 overlay?.hide()
             }
         }
-        // 切换填入方式：立刻按新方式收拾界面，不用等下一次事件
+        // 切换填入方式：立刻按新方式收拾界面，不用等下一次事件。
+        // 直填模式只留球：卡片收成球，球上进度字样清掉。
         if (key == Prefs.KEY_REPLY_MODE) {
             main.post {
                 QuickFillSession.clear()
-                syncQuickBubble(rootInActiveWindow?.packageName?.toString())
-                if (quickMode) overlay?.hide()
+                syncBubble(rootInActiveWindow?.packageName?.toString())
+                if (quickMode) {
+                    overlay?.showIdle(null)
+                    overlay?.setBubbleLabel(null)
+                }
             }
         }
     }
@@ -270,11 +271,13 @@ open class ChatCaptureService : AccessibilityService() {
         getSharedPreferences(Prefs.PREFS_MAIN, MODE_PRIVATE)
             .registerOnSharedPreferenceChangeListener(preferencesListener)
         overlay = OverlayController(this)
-        // 「一键直填」的球：只在推特 + 直填模式下出现，点一下分析并直接填入
-        quickBubble = QuickFillBubble(this, prefs) { quickTap() }
-        // 手动点面板：以前 currentSnapshot 为 null 就直接短路（点了毫无反应，
-        // 看着像「卡死不肯恢复」）。现在先就地重抓一次当前窗口，抓不到才提示。
-        overlay?.onManualAnalyze = { analyzeOnDemand() }
+        // 只有一颗球了：绿球（一键直填）已停用，直填模式也走这颗球，见 quickTap()
+        // 手动点面板：认得出就分析，认不出就把原因说清楚（不再静默短路）。
+        overlay?.onManualAnalyze = {
+            // 直填模式 + 推特：点球 = 一键直填；其它情况点球 = 打开分析面板
+            if (quickMode && rootInActiveWindow?.packageName?.toString() == X_PKG) quickTap()
+            else analyzeOnDemand()
+        }
         overlay?.onRegenerate = { regenerateReplies() }
         // Bubble menu: file the open conversation as a knowledge-base contact.
         // Contacts are never created automatically — this is the one-tap way in.
@@ -335,7 +338,7 @@ open class ChatCaptureService : AccessibilityService() {
         if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             val fg = rootInActiveWindow?.packageName?.toString()
             // 直填球跟着前台走（离开推特就收走）
-            syncQuickBubble(fg)
+            syncBubble(fg)
             // Blocked apps: never read/screenshot/OCR/fill there, only show the
             // one-time "not supported" notice and stop. Checked before the
             // generic no-adapter branch.
@@ -355,6 +358,8 @@ open class ChatCaptureService : AccessibilityService() {
                     main.postDelayed(confirmAwayHide, FOREGROUND_CONFIRM_MS)
                 } else {
                     main.removeCallbacks(confirmAwayHide)
+                    // 未适配的应用：球留着（菜单还能进「截屏识别一次」），标成认不出
+                    markReadable(false, currentUnreadableReason())
                     overlay?.showIdle(null)
                 }
                 return
@@ -373,8 +378,8 @@ open class ChatCaptureService : AccessibilityService() {
         main.removeCallbacks(confirmAwayHide)
         val root = rootInActiveWindow ?: run { leaveConversation(); overlay?.hide(); return }
         val pkg = root.packageName?.toString()
-        // 直填球跟着前台走：推特 + 直填模式才出现，其它情况立刻收走
-        syncQuickBubble(pkg)
+        // 唯一那颗球跟着前台走：可用的第三方应用上都摆着，桌面/自己/屏蔽应用上不摆
+        syncBubble(pkg)
         // Blocked apps — no tree read, no screenshot, no OCR, no fill. A
         // content-changed / scrolled event there only re-shows the one-time
         // notice (deduped); it must never reach an adapter or the OCR path.
@@ -384,6 +389,7 @@ open class ChatCaptureService : AccessibilityService() {
         // the only way in for them is the bubble menu's "截屏识别一次".
         val adapter = adapters[pkg] ?: run {
             if (session.target != null && session.target != targetFor(root)) leaveConversation()
+            markReadable(false, currentUnreadableReason())
             return
         }
         // Outside a chat window (the conversation list, a profile, settings…) the
@@ -400,27 +406,32 @@ open class ChatCaptureService : AccessibilityService() {
         main.removeCallbacks(confirmLeave)
         observeTarget(target)
         overlay?.setApp(pkg)
+        // 认出来了：球保持蓝色
+        markReadable(true)
         // Use only this window's title; never inherit another conversation's title.
         val snapshot = rawSnapshot
         if (!snapshot.title.isNullOrBlank()) lastKnownTitle = snapshot.title
         if (!prefs.isAllowed(snapshot.title)) {
-            // 以前这里是静默 hide()：面板凭空消失，用户只会以为 App 坏了
+            // 以前这里是静默 hide()：面板凭空消失，用户只会以为 App 坏了。
+            // 现在球留着并标成认不出，点一下就说清「不在白名单」。
             noWhitelistNotice()
             leaveConversation()
-            overlay?.hide()
+            markReadable(false, "这个会话不在白名单里，去设置里加上它的标题")
+            overlay?.showIdle(null)
             return
         }
         // 直填模式：只在推特上生效——不自动分析、不显示卡片，只有用户点球才分析。
         // 其它 App（QQ/飞书/WhatsApp）照旧走卡片那套，两套互不干扰。
+        // 注意这里是「卡片收成球」而不是 hide()——hide 会把唯一的球也收走。
         if (quickMode && pkg == X_PKG) {
             currentSnapshot = snapshot.withSource(pkg)
             if (QuickFillSession.size() > 0 &&
                 !QuickFillSession.matches(QuickFillSession.signatureOf(snapshot))) {
                 // 对方发了新消息 / 换了会话：这一轮的候选作废，别再拿旧回复去套
                 QuickFillSession.clear()
-                quickBubble?.setLabel(null)
+                overlay?.setReadState(OverlayController.ReadState.READY)
             }
-            overlay?.hide()
+            overlay?.showIdle(null)
             return
         }
         // In a chat window but the tree holds no text (Feishu draws its bodies)
@@ -496,11 +507,20 @@ open class ChatCaptureService : AccessibilityService() {
         val adapter = root?.packageName?.toString()?.let { adapters[it] }
         val gone = root == null || adapter == null ||
             adapter.extract(root, resources) == null || targetFor(root) == null
-        if (gone) { leaveConversation(); overlay?.showIdle(null) }
+        if (gone) {
+            leaveConversation()
+            markReadable(false, currentUnreadableReason())
+            overlay?.showIdle(null)
+        }
     }
 
     private fun scheduleLeave() {
-        if (session.target == null) { leaveConversation(); overlay?.showIdle(null); return }
+        if (session.target == null) {
+            leaveConversation()
+            markReadable(false, currentUnreadableReason())
+            overlay?.showIdle(null)
+            return
+        }
         main.removeCallbacks(confirmLeave)
         main.postDelayed(confirmLeave, LEAVE_CONFIRM_MS)
     }
@@ -519,7 +539,22 @@ open class ChatCaptureService : AccessibilityService() {
             return
         }
         unreadableAttempts = 0
+        // 判定为认不出：球变灰并在点击时说明原因
+        markReadable(false, currentUnreadableReason())
         scheduleLeave()
+    }
+
+    /** 认不出时的一句话原因（[explainUnreadable] 的精简版，给球用）。 */
+    private fun currentUnreadableReason(): String {
+        val root = rootInActiveWindow
+        val pkgs = root?.packageName?.toString()
+        return when {
+            root == null -> "读不到当前窗口，请重新打开聊天界面"
+            isBlocked(pkgs) -> "这个应用被主动屏蔽了"
+            pkgs == packageName -> "你现在在 App 自己的界面里"
+            pkgs !in adapters -> "「${appName(pkgs)}」还没适配，长按球选「截屏识别一次」试试"
+            else -> "这一屏不像聊天窗口，进到具体对话里再点"
+        }
     }
 
     /** 白名单挡掉时说明原因（节流），别让面板静悄悄消失。 */
@@ -530,16 +565,72 @@ open class ChatCaptureService : AccessibilityService() {
         main.postDelayed({ whitelistNoticeShown = false }, 5000)
     }
 
-    /** 直填球只在「直填模式 + 前台是推特 + 助手开着」时出现，其它情况立刻收走。 */
-    private fun syncQuickBubble(pkg: String?) {
-        val bubble = quickBubble ?: return
-        val want = quickMode && prefs.enabled && pkg == X_PKG
-        if (want) {
-            if (!bubble.isShowing()) bubble.show()
-        } else if (bubble.isShowing()) {
-            bubble.hide()
-            bubble.setLabel(null)
+    /**
+     * 只剩一颗球之后的显隐逻辑。
+     *
+     * 以前是两颗：蓝球（分析卡片入口）+ 绿球（一键直填），直填模式两颗同时在屏上，
+     * 这就是用户看到的「一蓝一绿」。现在统一成一颗，绿球那条路彻底关掉。
+     * 球只在「助手开着 + 第三方应用」上摆出来：桌面、系统界面、自己的设置页
+     * 交给 [confirmAwayHide] 的宽限期收走，屏蔽应用交给 [showBlocked]，
+     * 这里不抢着摆，免得先闪一下再消失。
+     */
+    private fun syncBubble(pkg: String?) {
+        if (!prefs.enabled) { overlay?.hide(); return }
+        val drop = pkg == null || isBlocked(pkg) || pkg == packageName ||
+            pkg == "com.android.systemui" ||
+            pkg.contains("launcher", ignoreCase = true) || pkg == "com.miui.home"
+        if (drop) return
+        if (overlay?.isShowing() != true) overlay?.showIdle(null)
+    }
+
+    /** 球上的状态：认得出就是蓝色，认不出是灰色 ?，点球会说原因。 */
+    private fun markReadable(ok: Boolean, reason: String? = null) {
+        val ov = overlay ?: return
+        ov.setReadState(
+            if (ok) OverlayController.ReadState.READY
+            else OverlayController.ReadState.no(reason ?: "当前屏幕不是聊天界面，或读不到消息内容")
+        )
+    }
+
+    /**
+     * 一次性说明「为什么现在识别不了」。点灰球时调用。
+     * 原因按优先级逐条判断，只回一句最贴切的话。
+     */
+    private fun explainUnreadable() {
+        val root = rootInActiveWindow
+        val pkgs = root?.packageName?.toString()
+        val why = when {
+            !prefs.enabled -> "助手已关闭，去设置里重新打开"
+            !prefs.hasKey() -> "还没填判断接口的密钥，去设置里填"
+            root == null -> "读不到当前窗口，请重新打开聊天界面"
+            isBlocked(pkgs) -> "这个应用被主动屏蔽了（微信、Soul 不在支持范围）"
+            pkgs == packageName || pkgs == "com.android.systemui" ||
+                pkgs?.contains("launcher", true) == true ->
+                "你现在在桌面或系统界面，请先进到聊天里"
+            pkgs !in adapters -> "「${appName(pkgs)}」还没适配，长按球选「截屏识别一次」"
+            else -> {
+                val adapter = adapters[pkgs]
+                val snap = adapter?.extract(root!!, resources)
+                when {
+                    snap == null -> "这一屏不像聊天窗口（可能是列表页、设置页），请进到具体对话里"
+                    !prefs.isAllowed(snap.title) -> "这个会话不在白名单里，去设置里加上它的标题"
+                    snap.messages.isEmpty() -> "在聊天里，但读不到消息文字（可能要开 OCR 兜底）"
+                    else -> "刚刚没读到，稍微动一下屏幕再试"
+                }
+            }
         }
+        overlay?.toast(why)
+    }
+
+    /** 包名 → 用户认得的名字，说不认识时才不像报错。 */
+    private fun appName(pkg: String?): String = when (pkg) {
+        "com.tencent.mobileqq" -> "QQ"
+        "com.ss.android.lark" -> "飞书"
+        "com.twitter.android" -> "推特"
+        "com.whatsapp" -> "WhatsApp"
+        "com.tencent.mm" -> "微信"
+        null -> "这个应用"
+        else -> pkg
     }
 
     /**
@@ -566,9 +657,12 @@ open class ChatCaptureService : AccessibilityService() {
     private fun analyzeOnDemand() {
         val snapshot = currentSnapshot ?: captureNow()
         if (snapshot == null) {
-            overlay?.toast("没认出当前聊天页：滚动一下，或切回聊天窗口再点")
+            // 认不出的时候不要只丢一句「没认出」——把具体原因说清楚
+            markReadable(false)
+            explainUnreadable()
             return
         }
+        markReadable(true)
         if (!prefs.isAllowed(snapshot.title)) {
             noWhitelistNotice()
             return
@@ -587,16 +681,23 @@ open class ChatCaptureService : AccessibilityService() {
         if (!prefs.hasKey()) { overlay?.toast("还没填判断接口的密钥，去设置里填"); return }
         val snapshot = captureNow()
         if (snapshot == null) {
-            overlay?.toast("没认出推特聊天页：进到私信里再点")
+            // 认不出：球标灰，再把原因说清楚（和卡片模式点灰球同一套话）
+            markReadable(false, currentUnreadableReason())
+            explainUnreadable()
             return
         }
-        if (!prefs.isAllowed(snapshot.title)) { noWhitelistNotice(); return }
+        if (!prefs.isAllowed(snapshot.title)) {
+            markReadable(false, "这个会话不在白名单里，去设置里加上它的标题")
+            noWhitelistNotice()
+            return
+        }
+        markReadable(true)
         val sig = QuickFillSession.signatureOf(snapshot)
         if (QuickFillSession.matches(sig)) {
             val next = QuickFillSession.next()
             if (next != null) {
                 val (text, i, total) = next
-                quickBubble?.setLabel(label(i, total))
+                overlay?.setBubbleLabel(label(i, total))
                 fillInput(session.token() ?: return, text, "已填入第 $i/$total 条，发送还是你点")
                 return
             }
@@ -605,7 +706,7 @@ open class ChatCaptureService : AccessibilityService() {
         QuickFillSession.clear()
         pendingSnapshot = snapshot
         quickAnalysisPending = true
-        quickBubble?.setLabel("…")
+        // 分析中：球保持当前状态
         runAnalysis(quick = sig)
     }
 
@@ -621,14 +722,15 @@ open class ChatCaptureService : AccessibilityService() {
     ) {
         quickAnalysisPending = false
         if (error != null || ranked.isEmpty()) {
-            quickBubble?.setLabel(null)
+            // 没烧出候选：进度字样清掉，球回到认得出的蓝色
+            overlay?.setReadState(OverlayController.ReadState.READY)
             overlay?.toast(error ?: "没生成出候选回复")
             return
         }
         QuickFillSession.reset(sig, ranked.map { it.text })
         val next = QuickFillSession.next() ?: return
         val (text, i, total) = next
-        quickBubble?.setLabel(label(i, total))
+        overlay?.setBubbleLabel(label(i, total))
         fillInput(token, text, "已填入第 $i/$total 条，发送还是你点")
     }
 
@@ -987,7 +1089,12 @@ open class ChatCaptureService : AccessibilityService() {
             if (manual) overlay?.showError("这一屏没认出文字")
             return
         }
-        if (!prefs.isAllowed(snapshot.title)) { leaveConversation(); overlay?.hide(); return }
+        if (!prefs.isAllowed(snapshot.title)) {
+            leaveConversation()
+            markReadable(false, "这个会话不在白名单里，去设置里加上它的标题")
+            overlay?.showIdle(null)
+            return
+        }
 
         if (pkg.isNotEmpty() && pkg != activePkg) { activePkg = pkg; lastSignature = "" }
         currentSnapshot = snapshot.withSource(pkg)
@@ -1117,8 +1224,6 @@ open class ChatCaptureService : AccessibilityService() {
         overlay?.onOcrCapture = null
         overlay?.hide()
         overlay = null
-        quickBubble?.hide()
-        quickBubble = null
         QuickFillSession.clear()
         worker.shutdownNow()
     }

@@ -26,7 +26,7 @@ Android 11+ · 仅 arm64-v8a · 不自动发送
 
 | | 点选候选 | 一键直填（仅推特） |
 |---|---|---|
-| 界面 | 聊天界面上方的分析卡片 | 可拖动的小绿球 |
+| 界面 | 聊天界面上方的分析卡片 | 屏幕边上唯一那颗球（点一下直接填） |
 | 动作 | 卡片列 3 条，点「填入」 | 点一下：分析 + 直接填第 1 条 |
 | 不满意 | 点「换一组」重新生成 | 再点：换第 2 条 → 第 3 条 → 回到第 1 条 |
 | 范围 | 所有已适配 App | 只有推特 |
@@ -62,10 +62,10 @@ Android 11+ · 仅 arm64-v8a · 不自动发送
 **1. 装包**
 
 ```bash
-adb install -r cn/apk/chat-bot-v1.0.apk
+adb install -r cn/apk/chat-bot-v1.1.apk
 ```
 
-或直接下载：[chat-bot-v1.0.apk](apk/chat-bot-v1.0.apk)
+或直接下载：[chat-bot-v1.1.apk](apk/chat-bot-v1.1.apk)
 
 > 包名 `com.aron.chatbot` 与之前的 Jev 版（`com.jev.probe`）不同，是独立应用，可并存安装。
 
@@ -79,15 +79,15 @@ adb install -r cn/apk/chat-bot-v1.0.apk
 
 **4. 用起来**
 
-进聊天界面，对方发消息后自动分析出卡片；或在设置里切成「一键直填」，点推特旁边的小绿球。
+进聊天界面，对方发消息后自动分析出卡片；或在设置里切成「一键直填」，点推特旁边的球直接填（球上显示 `2/3` 这样的进度）。球是蓝色 CB 就是认得出当前聊天页，灰色 ? 就是认不出——点一下会告诉你为什么。
 
 ## 发版
 
 ```bash
 # 改 cn/app/build.gradle.kts 的 versionCode / versionName
 # 打 tag 推送，CI 会自动构建签名包并发 Release
-git tag v1.12
-git push origin v1.12
+git tag v1.1
+git push origin v1.1
 ```
 
 CI 需要四个 Secrets：`ANDROID_KEYSTORE_BASE64`、`ANDROID_STORE_PASSWORD`、`ANDROID_KEY_ALIAS`、`ANDROID_KEY_PASSWORD`。tag 和 `versionName` 对不上会直接失败。
@@ -105,10 +105,10 @@ cd cn
 
 ```
 cn/          国内版 Android 工程（主）
-  app/src/main/java/com/jev/probe/
+  app/src/main/java/com/aron/chatbot/
     capture/   无障碍采集（QQ / X / 飞书 / WhatsApp 适配器）
     jev/       模型客户端（判断、起草、评论提示词）
-    overlay/   悬浮窗（分析卡片 + 一键直填球）
+    overlay/   悬浮窗（分析卡片 + 唯一那颗状态球）
     update/    在线更新
     core/      数据模型与设置
 global/      海外版工程

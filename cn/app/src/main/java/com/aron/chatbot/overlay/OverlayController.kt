@@ -39,7 +39,10 @@ import kotlin.math.roundToInt
  *   replace the old ones in place — the card never pops open on its own and is
  *   never left blank while a round runs.
  * - **Bubble** (outside a chat window, or in an app without an adapter): the
- *   small "CB" ball; tapping or long-pressing it opens the menu (截屏识别一次…).
+ *   small "CB" ball. It doubles as a status light for the current screen —
+ *   blue "CB" = recognized chat page, gray "?" = not readable. A tap runs the
+ *   analysis (or explains why the screen is not readable); long-press opens the
+ *   menu (截屏识别一次…).
  *
  * Long-pressing the card header opens the same menu.
  */
@@ -176,16 +179,66 @@ class OverlayController(private val ctx: Context) {
 
     // ---------------------------------------------------------------- bubble
 
+    /**
+     * 唯一的那颗球。颜色和字样就是「当前屏幕认不认得」的状态灯：
+     * - 蓝色 "CB"：认得出这个聊天页，点一下分析（直填模式下点一下直接填）
+     * - 灰色 "?"：认不出，点了会告诉你为什么认不出
+     * 不再有第二颗绿球——一键直填也走这一个入口（见 [Prefs.replyMode]）。
+     * 菜单（截屏识别一次 / 存联系人 / 设置）走长按。
+     */
+    private var bubbleView: TextView? = null
+    private var bubbleState: ReadState? = null
+    /** 直填进度这类临时字样（如 `2/3`），有就盖掉默认的 CB / ?。 */
+    private var bubbleLabel: String? = null
+
     private fun buildBubble(): View {
         val b = TextView(ctx).apply {
-            text = "Jev"; setTextColor(Color.WHITE); gravity = Gravity.CENTER; textSize = 13f
+            text = "CB"; setTextColor(Color.WHITE); gravity = Gravity.CENTER; textSize = 13f
             setTypeface(typeface, Typeface.BOLD)
-            alpha = 0.7f
-            background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.argb(235, 58, 122, 254)) }
+            alpha = 0.85f
+            background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(COLOR_UNKNOWN) }
             layoutParams = FrameLayout.LayoutParams(dp(52), dp(52))
         }
-        attachDrag(b, widthPx = { dp(52) }, onTap = { showMenu(dp(56)) }) { x, y -> prefs.bubbleX = x; prefs.bubbleY = y }
+        bubbleView = b
+        applyBubbleState()
+        attachDrag(b, widthPx = { dp(52) }, onTap = { onManualAnalyze?.invoke() }) { x, y -> prefs.bubbleX = x; prefs.bubbleY = y }
         return b
+    }
+
+    /**
+     * 更新球的状态：认得出为蓝色 CB，认不出为灰色 ?。
+     * 这是「使用时标注」的那一半——球本身就是常驻的识别结果。
+     * 换状态会顺带清掉临时进度字样。
+     */
+    fun setReadState(state: ReadState) {
+        if (bubbleState == state && bubbleLabel == null) return
+        bubbleState = state
+        bubbleLabel = null
+        applyBubbleState()
+    }
+
+    /** 直填进度这类临时字样（`2/3`），传 null 回到 CB / ?。 */
+    fun setBubbleLabel(label: String?) {
+        bubbleLabel = label
+        applyBubbleState()
+    }
+
+    private fun applyBubbleState() {
+        val b = bubbleView ?: return
+        val ok = bubbleState?.readable == true
+        b.text = bubbleLabel ?: if (ok) "CB" else "?"
+        b.background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(if (ok) COLOR_READY else COLOR_UNKNOWN)
+        }
+    }
+
+    /** 认得出 / 认不出 + 原因。认不出时点球会把这句原因弹出来。 */
+    data class ReadState(val readable: Boolean, val reason: String? = null) {
+        companion object {
+            val READY = ReadState(true)
+            fun no(reason: String) = ReadState(false, reason)
+        }
     }
 
     // ------------------------------------------------------------------ card
@@ -636,6 +689,10 @@ class OverlayController(private val ctx: Context) {
     companion object {
         /** The card gives up on a round after this long, whatever the service is doing. */
         private const val UI_LIMIT_S = 40
+
+        /** 球的两种状态色：认得出（蓝）/ 认不出（灰）。 */
+        private val COLOR_READY = Color.parseColor("#3A7AFE")
+        private val COLOR_UNKNOWN = Color.parseColor("#9CA3AF")
 
         private val INTENT = mapOf(
             "confirm_you_care" to "确认你在不在乎", "vent_anger" to "在发泄情绪",
