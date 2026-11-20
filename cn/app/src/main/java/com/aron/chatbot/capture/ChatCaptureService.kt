@@ -11,6 +11,7 @@ import android.os.SystemClock
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import com.aron.chatbot.capture.ocr.MlKitOcr
 import com.aron.chatbot.capture.ocr.OcrLine
 import com.aron.chatbot.capture.ocr.ScreenCapture
@@ -106,6 +107,8 @@ open class ChatCaptureService : AccessibilityService() {
     private var analyzing = false
     /** A "换一组" redraft is in flight (candidates only; the judgment stays). */
     private var regenerating = false
+    /** 每轮分析一个号：旧轮迟到的收尾不能动新轮的 analyzing 旗子。 */
+    private var roundSeq = 0
     private val session = ConversationSession()
     /** Tells new incoming messages apart from scrolling through history. */
     private val gate = NewMessageGate()
@@ -126,7 +129,7 @@ open class ChatCaptureService : AccessibilityService() {
         if (key == Prefs.KEY_REPLY_MODE) {
             main.post {
                 QuickFillSession.clear()
-                syncBubble(rootInActiveWindow?.packageName?.toString())
+                syncBubble(activeRoot()?.packageName?.toString())
                 if (quickMode) {
                     overlay?.showIdle(null)
                     overlay?.setBubbleLabel(null)
@@ -142,6 +145,9 @@ open class ChatCaptureService : AccessibilityService() {
         pendingSnapshot = null
         analyzing = false
         regenerating = false
+        // 一轮没了，「直填分析中」的旗子必须一起放下：漏放的后果是球永远
+        // 回应「正在分析，稍等一下」，看起来就是蓝球点了没反应（v1.1 真机）。
+        quickAnalysisPending = false
         analysisTasks.forEach { it.cancel(true) }
         analysisTasks.clear()
         overlay?.resetForNewConversation()
@@ -153,6 +159,7 @@ open class ChatCaptureService : AccessibilityService() {
         main.removeCallbacks(debounce)
         analyzing = false
         regenerating = false
+        quickAnalysisPending = false
         analysisTasks.forEach { it.cancel(true) }
         analysisTasks.clear()
     }
@@ -174,6 +181,25 @@ open class ChatCaptureService : AccessibilityService() {
         observeTarget(null)
         cancelAnalysis()
         currentSnapshot = null
+    }
+
+    /**
+     * 真正的「前台应用」根节点。
+     *
+     * rootInActiveWindow 在键盘弹出时可能落在输入法窗口上（部分输入法/机型），
+     * 于是 targetFor 把输入法当前台，判定「离开了会话」——本轮分析被作废、
+     * 点球永远得不到回音，看起来就是蓝球点了没反应。这里发现活动窗口是
+     * 输入法时，换回窗口列表里真正的应用窗口。
+     */
+    private fun activeRoot(): AccessibilityNodeInfo? {
+        val raw = rootInActiveWindow ?: return null
+        val wins = windows ?: return raw
+        val ime = wins.firstOrNull { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD }
+        if (ime != null && raw.windowId == ime.id) {
+            val app = wins.firstOrNull { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
+            if (app != null) return app.root
+        }
+        return raw
     }
 
     /** Read the live target, never the previous chat's cached/stabilized title. */
@@ -207,7 +233,7 @@ open class ChatCaptureService : AccessibilityService() {
 
     private fun isCurrent(token: ConversationSession.Token): Boolean {
         if (destroyed || !prefs.enabled || !session.accepts(token)) return false
-        val live = rootInActiveWindow?.let { targetFor(it) }
+        val live = activeRoot()?.let { targetFor(it) }
         // A null re-extract is a transient accessibility glitch (list animation,
         // node cache miss), NOT proof the chat was left — hiding there killed
         // freshly rendered candidates (seen on QQ). Identity checks apply
@@ -237,7 +263,7 @@ open class ChatCaptureService : AccessibilityService() {
      * short grace period; any chat-app event in between cancels the hide.
      */
     private val confirmAwayHide = Runnable {
-        val fg = rootInActiveWindow?.packageName?.toString()
+        val fg = activeRoot()?.packageName?.toString()
         val stillAway = fg == null || fg == packageName ||
             fg.contains("launcher", ignoreCase = true) ||
             fg == "com.miui.home" || fg == "com.android.systemui"
@@ -274,11 +300,19 @@ open class ChatCaptureService : AccessibilityService() {
         // 只有一颗球了：绿球（一键直填）已停用，直填模式也走这颗球，见 quickTap()
         // 手动点面板：认得出就分析，认不出就把原因说清楚（不再静默短路）。
         overlay?.onManualAnalyze = {
-            // 直填模式 + 推特：点球 = 一键直填；其它情况点球 = 打开分析面板
-            if (quickMode && rootInActiveWindow?.packageName?.toString() == X_PKG) quickTap()
+            // 直填模式 + 推特：点球 = 一键直填；其它情况点球 = 打开分析面板。
+            // 前台包名用 activeRoot() 判：键盘弹出时输入法会抢走
+            // rootInActiveWindow，直接用它会把推特误判成别的应用、走错分支。
+            if (quickMode && activeRoot()?.packageName?.toString() == X_PKG) quickTap()
             else analyzeOnDemand()
         }
         overlay?.onRegenerate = { regenerateReplies() }
+        // 面板 40 秒放弃一轮时把「分析中」的旗子一起放下，否则卡片/球看着
+        // 能点，点了却因 analyzing 卡在 true 而永远没反应。
+        overlay?.onGiveUp = {
+            analyzing = false
+            quickAnalysisPending = false
+        }
         // Bubble menu: file the open conversation as a knowledge-base contact.
         // Contacts are never created automatically — this is the one-tap way in.
         overlay?.onSaveContact = {
@@ -326,8 +360,9 @@ open class ChatCaptureService : AccessibilityService() {
         // Decide "did we leave the chat app" from the REAL active window, not the
         // event's package. The event package can be an IME (e.g. com.tencent.wetype)
         // or the status bar while the chat app is still foreground — keying off it
-        // made the bubble flicker (hide → re-show → hide…). rootInActiveWindow stays
-        // on the chat app while the keyboard is up, so this is stable.
+        // made the bubble flicker (hide → re-show → hide…). rootInActiveWindow
+        // itself can ALSO land on the IME when the keyboard opens (v1.2 real
+        // device), so activeRoot() swaps back to the application window there.
         //
         // An app with no adapter is NOT a reason to take the bubble away: the only
         // way into DingTalk / Telegram / anything else is the bubble menu's
@@ -336,7 +371,9 @@ open class ChatCaptureService : AccessibilityService() {
         // The bubble does come off for places where it would only be in the way:
         // our own settings screens, the launcher, and the system UI.
         if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-            val fg = rootInActiveWindow?.packageName?.toString()
+            // 用 activeRoot() 判前台：输入法窗口弹出/收起也会发这个事件，
+            // 拿 rootInActiveWindow 的包名会把输入法当前台、误判离开会话。
+            val fg = activeRoot()?.packageName?.toString()
             // 直填球跟着前台走（离开推特就收走）
             syncBubble(fg)
             // Blocked apps: never read/screenshot/OCR/fill there, only show the
@@ -344,7 +381,7 @@ open class ChatCaptureService : AccessibilityService() {
             // generic no-adapter branch.
             if (isBlocked(fg)) { foregroundPkg = fg; showBlocked(auto = true); return }
             if (fg != null && fg !in adapters) {
-                val target = rootInActiveWindow?.let { targetFor(it) }
+                val target = activeRoot()?.let { targetFor(it) }
                 if (session.target != target) leaveConversation()
                 foregroundPkg = fg
                 blockedNoticeShown = false // left a blocked app → allow the notice again next visit
@@ -376,7 +413,7 @@ open class ChatCaptureService : AccessibilityService() {
     private fun maybeCapture() {
         // The chat app is back (or never left): a pending hide confirmation is moot.
         main.removeCallbacks(confirmAwayHide)
-        val root = rootInActiveWindow ?: run { leaveConversation(); overlay?.hide(); return }
+        val root = activeRoot() ?: run { leaveConversation(); overlay?.hide(); return }
         val pkg = root.packageName?.toString()
         // 唯一那颗球跟着前台走：可用的第三方应用上都摆着，桌面/自己/屏蔽应用上不摆
         syncBubble(pkg)
@@ -503,7 +540,7 @@ open class ChatCaptureService : AccessibilityService() {
      * that way after a short grace period; any good read in between cancels it.
      */
     private val confirmLeave = Runnable {
-        val root = rootInActiveWindow
+        val root = activeRoot()
         val adapter = root?.packageName?.toString()?.let { adapters[it] }
         val gone = root == null || adapter == null ||
             adapter.extract(root, resources) == null || targetFor(root) == null
@@ -546,7 +583,7 @@ open class ChatCaptureService : AccessibilityService() {
 
     /** 认不出时的一句话原因（[explainUnreadable] 的精简版，给球用）。 */
     private fun currentUnreadableReason(): String {
-        val root = rootInActiveWindow
+        val root = activeRoot()
         val pkgs = root?.packageName?.toString()
         return when {
             root == null -> "读不到当前窗口，请重新打开聊天界面"
@@ -597,7 +634,7 @@ open class ChatCaptureService : AccessibilityService() {
      * 原因按优先级逐条判断，只回一句最贴切的话。
      */
     private fun explainUnreadable() {
-        val root = rootInActiveWindow
+        val root = activeRoot()
         val pkgs = root?.packageName?.toString()
         val why = when {
             !prefs.enabled -> "助手已关闭，去设置里重新打开"
@@ -639,7 +676,7 @@ open class ChatCaptureService : AccessibilityService() {
      * 一旦它被清空，手动点击就永远短路。
      */
     private fun captureNow(): ChatSnapshot? {
-        val root = rootInActiveWindow ?: return null
+        val root = activeRoot() ?: return null
         val pkg = root.packageName?.toString() ?: return null
         if (isBlocked(pkg)) return null
         val adapter = adapters[pkg] ?: return null
@@ -655,15 +692,18 @@ open class ChatCaptureService : AccessibilityService() {
 
     /** 手动入口：先抓，抓不到给人话；抓到就按当前模式走。 */
     private fun analyzeOnDemand() {
-        val snapshot = currentSnapshot ?: captureNow()
+        // 每次点击都现抓一次，抓不到再退回缓存：旧快照可能来自上一屏，
+        // 点了会拿着别的会话去分析，或者被会话校验静默拦下（点了没反应）。
+        val snapshot = captureNow() ?: currentSnapshot
         if (snapshot == null) {
             // 认不出的时候不要只丢一句「没认出」——把具体原因说清楚
-            markReadable(false)
+            markReadable(false, currentUnreadableReason())
             explainUnreadable()
             return
         }
         markReadable(true)
         if (!prefs.isAllowed(snapshot.title)) {
+            markReadable(false, "这个会话不在白名单里，去设置里加上它的标题")
             noWhitelistNotice()
             return
         }
@@ -698,7 +738,14 @@ open class ChatCaptureService : AccessibilityService() {
             if (next != null) {
                 val (text, i, total) = next
                 overlay?.setBubbleLabel(label(i, total))
-                fillInput(session.token() ?: return, text, "已填入第 $i/$total 条，发送还是你点")
+                // 会话令牌拿不到时不能悄悄 return——先把进度字样撤掉再说一声
+                val token = session.token()
+                if (token == null) {
+                    overlay?.setBubbleLabel(null)
+                    overlay?.toast("会话状态丢了，再点一次试试")
+                    return
+                }
+                fillInput(token, text, "已填入第 $i/$total 条，发送还是你点")
                 return
             }
         }
@@ -813,8 +860,18 @@ open class ChatCaptureService : AccessibilityService() {
             quickAnalysisPending = false
             return
         }
-        val previous = session.token() ?: run { quickAnalysisPending = false; return }
-        if (!isCurrent(previous)) { quickAnalysisPending = false; return }
+        val previous = session.token() ?: run {
+            quickAnalysisPending = false
+            if (quick == null) overlay?.showError("会话状态丢了，再点一次试试")
+            else overlay?.toast("会话状态丢了，再点一次试试")
+            return
+        }
+        if (!isCurrent(previous)) {
+            quickAnalysisPending = false
+            if (quick == null) overlay?.showError("会话刚变过，再点一次试试")
+            else overlay?.toast("会话刚变过，再点一次试试")
+            return
+        }
         if (!prefs.hasKey()) {
             quickAnalysisPending = false
             if (quick == null) overlay?.showError("未设置判断接口密钥，去设置里填")
@@ -823,6 +880,7 @@ open class ChatCaptureService : AccessibilityService() {
         }
         val token = session.begin() ?: run { quickAnalysisPending = false; return }
         analyzing = true
+        val round = ++roundSeq
         if (quick == null) {
             overlay?.beginRound()
             overlay?.setNote(snapshot.note)
@@ -831,20 +889,31 @@ open class ChatCaptureService : AccessibilityService() {
         val client = JevClient(prefs)
         val rel = prefs.relationship
         submitAnalysis {
+            // 知识库组装也压一个上限：它卡死的话整轮永远不会结束，
+            // 球就一直「正在分析」。
             val ctx = try {
-                ContextBuilder.build(this, snapshot, token.target.pkg, prefs)
+                withHardTimeout(CTX_TIMEOUT_MS, "知识库上下文") {
+                    ContextBuilder.build(this, snapshot, token.target.pkg, prefs)
+                }
             } catch (e: Exception) {
                 Log.w(TAG, "context build failed: ${e.javaClass.simpleName}"); null
             }
             main.post {
-                if (!isCurrent(token)) return@post
+                if (!isCurrent(token)) {
+                    // 本轮作废也要把「直填分析中」的旗子放下，否则球永远
+                    // 回应「正在分析，稍等一下」——蓝球点了没反应的元凶之一。
+                    quickAnalysisPending = false
+                    return@post
+                }
                 lastAnalyzed = snapshot
                 lastCtx = ctx
                 if (quick == null) overlay?.setContextInfo(ctx?.notes?.size ?: 0, ctx?.history?.size ?: 0)
                 var remaining = 2
                 fun completed() {
                     remaining--
-                    if (remaining == 0) {
+                    // 只有「当前这轮」的收尾才能放旗子：旧轮迟到的 completed
+                    // 把新轮的 analyzing 清掉，会让用户在一轮中间又起一轮。
+                    if (remaining == 0 && round == roundSeq) {
                         analyzing = false
                         analysisTasks.clear()
                     }
@@ -919,7 +988,7 @@ open class ChatCaptureService : AccessibilityService() {
      * the other person and the panel says so.
      */
     private fun ocrCaptureManual() {
-        val root = rootInActiveWindow
+        val root = activeRoot()
         val pkg = root?.packageName?.toString() ?: foregroundPkg ?: activePkg ?: ""
         // Blocked apps: a manual "截屏识别一次" must NOT take a screenshot there —
         // just show the notice (a manual tap always shows it).
@@ -992,7 +1061,7 @@ open class ChatCaptureService : AccessibilityService() {
                         // itself; one scroll tick in between and we would crop the
                         // rows next to the ones in the picture. Fall back to the
                         // old rects only if the tree gives us nothing now.
-                        val fresh = rootInActiveWindow?.let { collectFeishuBubbleRects(it, resources) }
+                        val fresh = activeRoot()?.let { collectFeishuBubbleRects(it, resources) }
                         ocrByRects(res.bitmap, if (fresh.isNullOrEmpty()) rects else fresh, treeTitle, pkg, token)
                     } else ocrWholeScreen(res.bitmap, treeTitle, pkg, manual, token)
                 }
@@ -1125,7 +1194,9 @@ open class ChatCaptureService : AccessibilityService() {
     /** Resolve only the originating chat's input, never an arbitrary foreground editor. */
     private fun inputFor(token: ConversationSession.Token): AccessibilityNodeInfo? {
         if (!isCurrent(token)) return null
-        val root = rootInActiveWindow ?: return null
+        // 填输入框时键盘往往开着——rootInActiveWindow 可能落在输入法上，
+        // 会把「目标输入框不存在」误判成找不到输入框（走了剪贴板兜底）。
+        val root = activeRoot() ?: return null
         if (targetFor(root) != token.target) return null
         val input = when (token.target.pkg) {
             "com.tencent.mobileqq" -> root.findAccessibilityNodeInfosByViewId("com.tencent.mobileqq:id/input").firstOrNull()
@@ -1222,6 +1293,7 @@ open class ChatCaptureService : AccessibilityService() {
         overlay?.onManualAnalyze = null
         overlay?.onSaveContact = null
         overlay?.onOcrCapture = null
+        overlay?.onGiveUp = null
         overlay?.hide()
         overlay = null
         QuickFillSession.clear()
@@ -1242,6 +1314,10 @@ open class ChatCaptureService : AccessibilityService() {
          *  see "生成超时" with a retry than keep waiting. */
         private const val JUDGE_TIMEOUT_MS = 30_000L
         private const val REPLY_TIMEOUT_MS = 30_000L
+
+        /** 知识库组装的上限。正常是本地 SQLite 毫秒级；卡死也要有个头，
+         *  否则整轮悬着，球永远「正在分析」。 */
+        private const val CTX_TIMEOUT_MS = 15_000L
 
         /** Grace period before a "not a chat" read really leaves the conversation. */
         private const val LEAVE_CONFIRM_MS = 1200L

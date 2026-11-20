@@ -81,6 +81,12 @@ class OverlayController(private val ctx: Context) {
     /** Menu → one manual screenshot + OCR of whatever app is open. */
     var onOcrCapture: (() -> Unit)? = null
 
+    /**
+     * 面板 40 秒放弃一轮（[giveUp]）时通知服务放旗子（analyzing /
+     * quickAnalysisPending）。不放的后果是球看着能点、点了却永远没反应。
+     */
+    var onGiveUp: (() -> Unit)? = null
+
     // ---- what the card currently shows (survives hide(); cleared by resetForNewConversation)
     private var app: String? = null
     private var judgment: Analysis? = null
@@ -498,6 +504,7 @@ class OverlayController(private val ctx: Context) {
         if (repliesWaiting) { repliesWaiting = false; if (replies.isNullOrEmpty()) replyError = "生成超时" }
         stopTicker()
         render()
+        onGiveUp?.invoke()
     }
 
     private fun flashIfCollapsed() {
