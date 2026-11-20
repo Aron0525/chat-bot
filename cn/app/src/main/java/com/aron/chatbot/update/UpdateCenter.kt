@@ -153,7 +153,7 @@ object UpdateCenter {
             m.contains("UnknownHost", ignoreCase = true) -> "域名解析失败，检查网络连接"
             m.contains("timeout", ignoreCase = true) -> "连接超时，请检查网络"
             m.contains("HTTP 403", ignoreCase = true) || m.contains("HTTP 429", ignoreCase = true) ->
-                "GitHub 限流了，过一会儿再试"
+                "GitHub 限流或网络受限（HTTP 403），换网络（开代理或切流量）再试"
             m.contains("HTTP 404", ignoreCase = true) -> "下载地址失效（HTTP 404），这个版本可能已被删除"
             m.contains("SSL", ignoreCase = true) || m.contains("Cert", ignoreCase = true) ->
                 "HTTPS 证书校验失败"

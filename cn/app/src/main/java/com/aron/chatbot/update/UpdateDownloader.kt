@@ -28,8 +28,28 @@ class UpdateDownloader(private val context: Context) {
     /**
      * 下载 [release] 指向的 apk，返回落地的文件。
      * [onProgress] 在下载线程被调用（UI 更新由调用方自己切回主线程）。
+     * 网络抖动/CDN 临时 403 会自动重试一次再报错。
      */
     fun download(
+        release: ReleaseInfo,
+        onProgress: (doneBytes: Long, totalBytes: Long) -> Unit
+    ): File {
+        var lastError: Exception? = null
+        for (attempt in 1..2) {
+            if (cancelled) throw Cancelled()
+            try {
+                return downloadOnce(release, onProgress)
+            } catch (e: Cancelled) {
+                throw e
+            } catch (e: Exception) {
+                lastError = e
+                if (attempt == 1) Thread.sleep(1500)
+            }
+        }
+        throw lastError ?: IOException("下载失败")
+    }
+
+    private fun downloadOnce(
         release: ReleaseInfo,
         onProgress: (doneBytes: Long, totalBytes: Long) -> Unit
     ): File {
@@ -38,6 +58,7 @@ class UpdateDownloader(private val context: Context) {
         val fileName = release.apkName.ifBlank { "jev-update.apk" }
         val target = File(dir, fileName)
         val partial = File(dir, fileName + ".part")
+        if (partial.exists()) partial.delete()
 
         var conn: HttpURLConnection? = null
         var url = release.apkUrl
@@ -110,6 +131,13 @@ class UpdateDownloader(private val context: Context) {
 
     companion object {
         private const val TAG = "UpdateDownloader"
-        private const val USER_AGENT = "JevUpdate/1.0 (Android)"
+
+        /**
+         * 浏览器风格的 UA。GitHub 的下载 CDN 和一些中间设备对奇怪 UA 更容易
+         * 给 403，浏览器长相最不容易被误伤。
+         */
+        private const val USER_AGENT =
+            "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
     }
 }
