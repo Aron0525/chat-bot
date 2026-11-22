@@ -446,7 +446,9 @@ open class ChatCaptureService : AccessibilityService() {
         // 认出来了：球保持蓝色
         markReadable(true)
         // Use only this window's title; never inherit another conversation's title.
-        val snapshot = rawSnapshot
+        // withSource 打上来源 App：推特/其他 App 的提示词分流全靠这个标记，
+        // 连 pendingSnapshot（真正进分析的那份）也必须带着它。
+        val snapshot = rawSnapshot.withSource(pkg)
         if (!snapshot.title.isNullOrBlank()) lastKnownTitle = snapshot.title
         if (!prefs.isAllowed(snapshot.title)) {
             // 以前这里是静默 hide()：面板凭空消失，用户只会以为 App 坏了。
@@ -501,7 +503,7 @@ open class ChatCaptureService : AccessibilityService() {
         // whose last few messages happen to match cannot swallow each other.
         if (pkg != activePkg) { activePkg = pkg; lastSignature = "" }
 
-        currentSnapshot = snapshot.withSource(pkg)
+        currentSnapshot = snapshot
         val sig = snapshot.signature()
         val showing = overlay?.isShowing() == true
         // Same content and the card is already up → nothing to do.
@@ -1182,7 +1184,8 @@ open class ChatCaptureService : AccessibilityService() {
         val auto = fresh && prefs.ocrAutoAnalyze && prefs.autoAnalyze && snapshot.latestFrom == "other"
         if (manual || auto) {
             cancelInFlight()
-            pendingSnapshot = snapshot
+            // 和树路径同款：进分析的这份也要带来源标记，推特走推特的提示词。
+            pendingSnapshot = snapshot.withSource(pkg)
             main.removeCallbacks(debounce)
             runAnalysis()
         } else {

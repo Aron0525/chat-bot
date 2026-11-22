@@ -87,4 +87,30 @@ class CommentPromptsTest {
         assertTrue(s, s.contains("评论回复助手"))
         assertTrue(CommentPrompts.styleLabel("不存在的风格").isNotEmpty())
     }
+
+    @Test
+    fun systemAnalyzesTheWholePageNotTheLastLine() {
+        val s = CommentPrompts.system(CommentPrompts.STYLE_ALL, 3)
+        // 推特按整页分析（帖子正文 + 屏幕上的回复 / 整段对话）
+        assertTrue(s, s.contains("整个页面的内容"))
+        // 「只看最后一句 / 最近一条消息」那套聊天措辞不能混进推特提示词
+        assertFalse(s, s.contains("最后一句"))
+        assertFalse(s, s.contains("最后一条消息"))
+        assertFalse(s, s.contains("最近一条消息"))
+    }
+
+    @Test
+    fun userPromptLabelsCarryTheWholePage() {
+        val u = CommentPrompts.user(
+            mainContent = "帖子正文",
+            author = null,
+            surroundings = listOf("回复一", "回复二", "回复三"),
+            n = 2,
+            avoid = emptyList()
+        )
+        // 页面上的每条内容都给出去，不做只看最后一条的截取
+        assertTrue(u, u.contains("回复一"))
+        assertTrue(u, u.contains("回复二"))
+        assertTrue(u, u.contains("回复三"))
+    }
 }
